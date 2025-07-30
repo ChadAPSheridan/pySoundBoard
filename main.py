@@ -1,37 +1,18 @@
 import sys
 import subprocess
 import json
+import numpy as np
+import soundfile as sf
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QGridLayout, QPushButton, QFileDialog, QInputDialog,
-    QMainWindow, QMenuBar, QMenu, QMessageBox, QVBoxLayout
+    QMainWindow, QMenuBar, QMenu, QMessageBox, QVBoxLayout, QComboBox
 )
 from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt
 import sounddevice as sd
 from sounddevice import PortAudioError
-import numpy as np
-import soundfile as sf
+
 def ensure_pipewire_virtual_source():
-    # Check if SoundboardSink and SoundboardSource exist
-    try:
-        sinks = subprocess.check_output(["pactl", "list", "short", "sinks"]).decode()
-        sources = subprocess.check_output(["pactl", "list", "short", "sources"]).decode()
-        if "SoundboardSink" not in sinks:
-            subprocess.run([
-                "pactl", "load-module", "module-null-sink",
-                "sink_name=SoundboardSink",
-                "sink_properties=device.description=SoundboardSink"
-            ], check=True)
-        if "SoundboardSource" not in sources:
-            subprocess.run([
-                "pactl", "load-module", "module-remap-source",
-                "master=SoundboardSink.monitor",
-                "source_name=SoundboardSource",
-                "source_properties=device.description=SoundboardSource"
-            ], check=True)
-    except Exception as e:
-        print(f"Warning: Could not set up PipeWire virtual source: {e}")
-    # Check if SoundboardSink and SoundboardSource exist
     try:
         sinks = subprocess.check_output(["pactl", "list", "short", "sinks"]).decode()
         sources = subprocess.check_output(["pactl", "list", "short", "sources"]).decode()
@@ -52,7 +33,6 @@ def ensure_pipewire_virtual_source():
         print(f"Warning: Could not set up PipeWire virtual source: {e}")
 
 def cleanup_pipewire_virtual_source():
-    # Unload modules for SoundboardSink and SoundboardSource
     try:
         modules = subprocess.check_output(["pactl", "list", "short", "modules"]).decode()
         for line in modules.splitlines():
@@ -62,17 +42,6 @@ def cleanup_pipewire_virtual_source():
     except Exception as e:
         print(f"Warning: Could not clean up PipeWire virtual source: {e}")
 
-import sys
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QGridLayout, QPushButton, QFileDialog, QInputDialog,
-    QMainWindow, QMenuBar, QMenu, QMessageBox, QVBoxLayout
-)
-from PyQt6.QtGui import QAction
-from PyQt6.QtCore import Qt
-import sounddevice as sd
-import numpy as np
-import soundfile as sf
-
 class SoundButton(QPushButton):
     def __init__(self, label, board, audio_path=None):
         super().__init__(label, board.central)
@@ -95,105 +64,29 @@ class SoundButton(QPushButton):
     def play_sound(self):
         if self.audio_path:
             data, fs = sf.read(self.audio_path, dtype='float32')
-            device_info = sd.query_devices(self.board.output_device, 'output')
-            device_rate = int(device_info['default_samplerate'])
-            if fs != device_rate:
-                # Resample using numpy
-                duration = data.shape[0] / fs
-                new_length = int(duration * device_rate)
-                if data.ndim == 1:
-                    data = np.interp(np.linspace(0, len(data), new_length, endpoint=False), np.arange(len(data)), data)
-                else:
-                    # For stereo or multi-channel
-                    data = np.stack([
-                        np.interp(np.linspace(0, len(data), new_length, endpoint=False), np.arange(len(data)), data[:, ch])
-                        for ch in range(data.shape[1])
-                    ], axis=-1)
-                fs = device_rate
+            device_idx = self.board.output_device
             try:
-                with sd.OutputStream(samplerate=fs, device=self.board.output_device, channels=data.shape[1] if data.ndim > 1 else 1) as stream:
+                device_info = sd.query_devices(device_idx, 'output')
+                device_rate = int(device_info['default_samplerate'])
+                if fs != device_rate:
+                    duration = data.shape[0] / fs
+                    new_length = int(duration * device_rate)
+                    if data.ndim == 1:
+                        data = np.interp(np.linspace(0, len(data), new_length, endpoint=False), np.arange(len(data)), data)
+                    else:
+                        data = np.stack([
+                            np.interp(np.linspace(0, len(data), new_length, endpoint=False), np.arange(len(data)), data[:, ch])
+                            for ch in range(data.shape[1])
+                        ], axis=-1)
+                    fs = device_rate
+                # Ensure data is float32 before playback
+                data = np.asarray(data, dtype=np.float32)
+                with sd.OutputStream(samplerate=fs, device=device_idx, channels=data.shape[1] if data.ndim > 1 else 1) as stream:
                     stream.write(data)
             except PortAudioError as e:
                 QMessageBox.critical(self, "Playback Error", f"Could not play sound.\nError: {e}\nTry converting your audio file to a standard sample rate like 48000 Hz or check your PipeWire device settings.")
             except Exception as e:
                 QMessageBox.critical(self, "Playback Error", f"Could not play sound.\nError: {e}")
-        else:
-            QMessageBox.information(self, "No Sound", "No audio file assigned to this button.")
-
-    def open_menu(self, pos):
-        menu = QMenu(self)
-        assign_action = QAction("Assign Sound & Label", self)
-        remove_action = QAction("Remove Button", self)
-        menu.addAction(assign_action)
-        menu.addAction(remove_action)
-        action = menu.exec(self.mapToGlobal(pos))
-        if action == assign_action:
-            file, _ = QFileDialog.getOpenFileName(self, "Select Audio File", "", "Audio Files (*.wav *.mp3 *.ogg)")
-            if file:
-                self.audio_path = file
-                text, ok = QInputDialog.getText(self, "Button Label", "Enter new label:", text=self.text())
-                if ok and text:
-                    self.setText(text)
-        elif action == remove_action:
-            self.board.remove_button(self)
-
-
-import sys
-import subprocess
-import json
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QGridLayout, QPushButton, QFileDialog, QInputDialog,
-    QMainWindow, QMenuBar, QMenu, QMessageBox, QVBoxLayout
-)
-from PyQt6.QtGui import QAction
-from PyQt6.QtCore import Qt
-import sounddevice as sd
-import numpy as np
-import soundfile as sf
-
-def ensure_pipewire_virtual_source():
-    # Check if SoundboardSink and SoundboardSource exist
-    try:
-        sinks = subprocess.check_output(["pactl", "list", "short", "sinks"]).decode()
-        sources = subprocess.check_output(["pactl", "list", "short", "sources"]).decode()
-        if "SoundboardSink" not in sinks:
-            subprocess.run([
-                "pactl", "load-module", "module-null-sink",
-                "sink_name=SoundboardSink",
-                "sink_properties=device.description=SoundboardSink"
-            ], check=True)
-        if "SoundboardSource" not in sources:
-            subprocess.run([
-                "pactl", "load-module", "module-remap-source",
-                "master=SoundboardSink.monitor",
-                "source_name=SoundboardSource",
-                "source_properties=device.description=SoundboardSource"
-            ], check=True)
-    except Exception as e:
-        print(f"Warning: Could not set up PipeWire virtual source: {e}")
-
-class SoundButton(QPushButton):
-    def __init__(self, label, board, audio_path=None):
-        super().__init__(label, board.central)
-        self.audio_path = audio_path
-        self.board = board
-        self.clicked.connect(self.play_sound)
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.customContextMenuRequested.connect(self.open_menu)
-
-    def to_dict(self):
-        return {
-            'label': self.text(),
-            'audio_path': self.audio_path
-        }
-
-    @staticmethod
-    def from_dict(data, board, row, col):
-        return SoundButton(data['label'], board, data.get('audio_path'))
-
-    def play_sound(self):
-        if self.audio_path:
-            data, fs = sf.read(self.audio_path, dtype='float32')
         else:
             QMessageBox.information(self, "No Sound", "No audio file assigned to this button.")
 
@@ -220,14 +113,44 @@ class SoundBoard(QMainWindow):
         self.setWindowTitle("pySoundBoard")
         self.central = QWidget()
         self.setCentralWidget(self.central)
+        self.main_layout = QVBoxLayout()
+        self.central.setLayout(self.main_layout)
+        self.device_dropdown = self.create_device_dropdown()
+        self.main_layout.addWidget(self.device_dropdown)
         self.layout = QGridLayout()
-        self.central.setLayout(self.layout)
+        self.main_layout.addLayout(self.layout)
         self.buttons = []
+        print("[DEBUG] Available devices:")
+        for idx, dev in enumerate(sd.query_devices()):
+            print(f"  [{idx}] {dev['name']} (max output channels: {dev['max_output_channels']}, max input channels: {dev['max_input_channels']})")
         self.output_device = self.get_pipewire_device()
+        self.device_dropdown.setCurrentIndex(self.output_device if self.output_device is not None else 0)
+        print(f"[DEBUG] Selected output device index: {self.output_device}")
+        if self.output_device is not None:
+            dev = sd.query_devices(self.output_device)
+            print(f"[DEBUG] Output device name: {dev['name']}")
         self.rows = 3
         self.cols = 3
         self.init_menu()
         self.init_ui()
+
+    def create_device_dropdown(self):
+        device_box = QComboBox()
+        self.device_names = []
+        self.device_indices = []
+        for idx, dev in enumerate(sd.query_devices()):
+            if dev['max_output_channels'] > 0:
+                label = f"{dev['name']} (idx {idx})"
+                device_box.addItem(label)
+                self.device_names.append(dev['name'])
+                self.device_indices.append(idx)
+        device_box.currentIndexChanged.connect(self.on_device_selected)
+        return device_box
+
+    def on_device_selected(self, idx):
+        if 0 <= idx < len(self.device_indices):
+            self.output_device = self.device_indices[idx]
+            print(f"[DEBUG] User selected output device: {self.device_names[idx]} (idx {self.output_device})")
 
     def init_menu(self):
         menubar = self.menuBar()
@@ -254,12 +177,10 @@ class SoundBoard(QMainWindow):
         self.buttons.append((btn, row, col))
 
     def add_button_dialog(self):
-        # Find next available grid position
         positions = [(i, j) for i in range(self.rows) for j in range(self.cols)]
         used = {(self.layout.getItemPosition(i)[0], self.layout.getItemPosition(i)[1]) for i in range(self.layout.count())}
         free = [pos for pos in positions if pos not in used]
         if not free:
-            # Add new row if grid is full
             self.rows += 1
             row, col = self.rows-1, 0
         else:
@@ -298,7 +219,6 @@ class SoundBoard(QMainWindow):
             return
         with open(path, 'r') as f:
             layout_data = json.load(f)
-        # Remove all current buttons
         for (btn, _, _) in self.buttons:
             self.layout.removeWidget(btn)
             btn.deleteLater()
@@ -311,12 +231,17 @@ class SoundBoard(QMainWindow):
             self.buttons.append((btn, btn_data['row'], btn_data['col']))
 
     def get_pipewire_device(self):
-        # Try to find a PipeWire virtual source
         devices = sd.query_devices()
         for idx, dev in enumerate(devices):
-            if 'SoundboardSink' in dev['name'] or 'SoundboardSource' in dev['name']:
+            if 'SoundboardSink' in dev['name']:
                 return idx
-        return None  # Default device
+        for idx, dev in enumerate(devices):
+            if 'pipewire' in dev['name'].lower():
+                return idx
+        for idx, dev in enumerate(devices):
+            if 'default' in dev['name'].lower():
+                return idx
+        return 0
 
 if __name__ == "__main__":
     from PyQt6.QtCore import QCoreApplication, Qt
@@ -327,4 +252,5 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = SoundBoard()
     win.show()
-    sys.exit(app.exec())
+sys.exit(app.exec())
+# End of file. All duplicate and corrupted code below this line has been removed.

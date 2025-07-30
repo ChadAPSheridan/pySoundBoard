@@ -1,5 +1,7 @@
 /.vscode
 /.venv
 /.env
+/clips/*
+*.json
 *.pyc
 __pycache__/

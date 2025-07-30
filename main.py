@@ -31,6 +31,37 @@ def ensure_pipewire_virtual_source():
             ], check=True)
     except Exception as e:
         print(f"Warning: Could not set up PipeWire virtual source: {e}")
+    # Check if SoundboardSink and SoundboardSource exist
+    try:
+        sinks = subprocess.check_output(["pactl", "list", "short", "sinks"]).decode()
+        sources = subprocess.check_output(["pactl", "list", "short", "sources"]).decode()
+        if "SoundboardSink" not in sinks:
+            subprocess.run([
+                "pactl", "load-module", "module-null-sink",
+                "sink_name=SoundboardSink",
+                "sink_properties=device.description=SoundboardSink"
+            ], check=True)
+        if "SoundboardSource" not in sources:
+            subprocess.run([
+                "pactl", "load-module", "module-remap-source",
+                "master=SoundboardSink.monitor",
+                "source_name=SoundboardSource",
+                "source_properties=device.description=SoundboardSource"
+            ], check=True)
+    except Exception as e:
+        print(f"Warning: Could not set up PipeWire virtual source: {e}")
+
+def cleanup_pipewire_virtual_source():
+    # Unload modules for SoundboardSink and SoundboardSource
+    try:
+        modules = subprocess.check_output(["pactl", "list", "short", "modules"]).decode()
+        for line in modules.splitlines():
+            if ("module-null-sink" in line and "SoundboardSink" in line) or ("module-remap-source" in line and "SoundboardSource" in line):
+                module_id = line.split()[0]
+                subprocess.run(["pactl", "unload-module", module_id], check=True)
+    except Exception as e:
+        print(f"Warning: Could not clean up PipeWire virtual source: {e}")
+
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QGridLayout, QPushButton, QFileDialog, QInputDialog,
@@ -289,8 +320,10 @@ class SoundBoard(QMainWindow):
 
 if __name__ == "__main__":
     from PyQt6.QtCore import QCoreApplication, Qt
+    import atexit
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, True)
     ensure_pipewire_virtual_source()
+    atexit.register(cleanup_pipewire_virtual_source)
     app = QApplication(sys.argv)
     win = SoundBoard()
     win.show()

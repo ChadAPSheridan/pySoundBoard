@@ -5,3 +5,7 @@
 *.json
 *.pyc
 __pycache__/
+**/*.log
+*.log
+**/*.db
+*.db

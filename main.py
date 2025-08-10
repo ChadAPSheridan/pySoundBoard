@@ -1,4 +1,3 @@
-
 import sys
 import subprocess
 import logging
@@ -178,6 +177,27 @@ class SoundButton(QPushButton):
             self.board.remove_button(self)
 
 class SoundBoard(QMainWindow):
+    def check_unsaved_changes(self):
+        if not self.current_config_id:
+            return False
+        # Get current config from DB
+        db_btns = self.db.get_config_buttons(self.current_config_id)
+        db_layout = {
+            (row, col): (label, audio_path)
+            for (label, audio_path, row, col) in db_btns
+        }
+        # Get current UI config
+        ui_layout = {
+            (row, col): (btn.text(), btn.audio_path)
+            for (btn, row, col) in self.buttons
+        }
+        # Compare
+        if db_layout != ui_layout:
+            reply = QMessageBox.question(self, "Save Config?", "Do you want to save your current configuration?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            if reply == QMessageBox.StandardButton.Yes:
+                self.save_config_dialog()
     def __init__(self):
         logger.debug("Initializing SoundBoard app...")
         super().__init__()
@@ -209,6 +229,7 @@ class SoundBoard(QMainWindow):
         self.rows = 3
         self.cols = 3
         self.current_config_id = None
+        self.current_config_name = None
         logger.debug("Initializing menu...")
         self.init_menu()
         logger.debug("Loading last used config...")
@@ -261,11 +282,26 @@ class SoundBoard(QMainWindow):
         export_action.triggered.connect(self.export_config_json)
         import_action = QAction("Import Config from JSON", self)
         import_action.triggered.connect(self.import_config_json)
+        new_config_action = QAction("New Config", self)
+        new_config_action.triggered.connect(self.new_config_dialog)
         board_menu.addAction(add_btn_action)
         board_menu.addAction(save_action)
         board_menu.addAction(load_action)
         board_menu.addAction(export_action)
         board_menu.addAction(import_action)
+        board_menu.addAction(new_config_action)
+
+
+    def new_config_dialog(self):
+        # Prompt to save if there are unsaved changes
+        self.check_unsaved_changes()
+
+        # Load default config (3x3 grid, default labels)
+        self.rows = 3
+        self.cols = 3
+        self.current_config_id = None
+        self.current_config_name = None
+        self.init_ui()
     def export_config_json(self):
         if not self.current_config_id:
             QMessageBox.information(self, "No Config", "No configuration loaded.")
@@ -305,6 +341,7 @@ class SoundBoard(QMainWindow):
             config_id = self.db.save_config(text, btn_dicts, self.rows, self.cols)
             self.db.set_last_used_config(config_id)
             self.current_config_id = config_id
+            self.current_config_name = text
             self.init_ui([(b['label'], b.get('audio_path'), b['row'], b['col']) for b in btns])
 
     def init_ui(self, buttons=None):
@@ -353,7 +390,12 @@ class SoundBoard(QMainWindow):
             self.buttons = [(b, r, c) for (b, r, c) in self.buttons if b != btn]
 
     def save_config_dialog(self):
-        text, ok = QInputDialog.getText(self, "Save Config", "Enter configuration name:")
+        text, ok = QInputDialog.getText(
+            self,
+            "Save Config",
+            "Enter configuration name:",
+            text=self.current_config_name if self.current_config_name else ""
+        )
         if ok and text:
             btns = [
                 {'label': btn.text(), 'audio_path': btn.audio_path, 'row': row, 'col': col}
@@ -362,8 +404,11 @@ class SoundBoard(QMainWindow):
             config_id = self.db.save_config(text, btns, self.rows, self.cols)
             self.db.set_last_used_config(config_id)
             self.current_config_id = config_id
+            self.current_config_name = text
 
     def switch_config_dialog(self):
+        # Prompt to save if there are unsaved changes
+        self.check_unsaved_changes()
         configs = self.db.get_all_configs()
         if not configs:
             QMessageBox.information(self, "No Configs", "No configurations found.")
@@ -371,18 +416,22 @@ class SoundBoard(QMainWindow):
         items = [name for (_, name) in configs]
         idx, ok = QInputDialog.getItem(self, "Switch Config", "Select configuration:", items, editable=False)
         if ok:
-            config_id = configs[items.index(idx)][0]
+            config_index = items.index(idx)
+            config_id, config_name = configs[config_index]
             self.db.set_last_used_config(config_id)
             self.current_config_id = config_id
+            self.current_config_name = config_name
             btns = self.db.get_config_buttons(config_id)
             self.init_ui(btns)
     def load_last_used_config(self):
         config = self.db.get_last_used_config()
         if config:
             self.current_config_id = config[0]
+            self.current_config_name = config[1] if len(config) > 1 else None
             btns = self.db.get_config_buttons(config[0])
             self.init_ui(btns)
         else:
+            self.current_config_name = None
             self.init_ui()
 
     def get_pipewire_device(self):
@@ -397,6 +446,10 @@ class SoundBoard(QMainWindow):
             if 'default' in dev['name'].lower():
                 return idx
         return 0
+
+    def closeEvent(self, event):
+        self.check_unsaved_changes()
+        event.accept()
 
 if __name__ == "__main__":
     from PyQt6.QtCore import QCoreApplication, Qt

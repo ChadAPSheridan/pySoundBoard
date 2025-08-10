@@ -1,5 +1,7 @@
+
 import sys
 import subprocess
+import logging
 from soundboard_db import SoundboardDB
 import numpy as np
 import soundfile as sf
@@ -12,35 +14,94 @@ from PyQt6.QtCore import Qt
 import sounddevice as sd
 from sounddevice import PortAudioError
 
+# Set up logging to file
+logging.basicConfig(
+    filename='app.log',
+    filemode='a',
+    format='%(asctime)s %(levelname)s: %(message)s',
+    level=logging.DEBUG
+)
+logger = logging.getLogger(__name__)
+
+class DeviceComboBox(QComboBox):
+    def __init__(self, parent=None, populate_callback=None):
+        super().__init__(parent)
+        self.populate_callback = populate_callback
+
+    def showPopup(self):
+        if self.populate_callback:
+            self.populate_callback(self)
+        super().showPopup()
+
+
 def ensure_pipewire_virtual_source():
+    logger.debug("Starting PipeWire virtual source setup...")
     try:
         sinks = subprocess.check_output(["pactl", "list", "short", "sinks"]).decode()
+        logger.debug(f"Sinks: {sinks}")
         sources = subprocess.check_output(["pactl", "list", "short", "sources"]).decode()
+        logger.debug(f"Sources: {sources}")
+        modules = subprocess.check_output(["pactl", "list", "short", "modules"]).decode()
+        logger.debug(f"Modules: {modules}")
+        # Create null sink for soundboard
         if "SoundboardSink" not in sinks:
+            logger.debug("Creating SoundboardSink...")
             subprocess.run([
                 "pactl", "load-module", "module-null-sink",
                 "sink_name=SoundboardSink",
                 "sink_properties=device.description=SoundboardSink"
             ], check=True)
-        if "SoundboardSource" not in sources:
+        # Get default mic
+        mic_source = subprocess.check_output(["pactl", "get-default-source"]).decode().strip()
+        logger.debug(f"Default mic source: {mic_source}")
+        # Create null sink for mix
+        if "SoundboardMix" not in sinks:
+            logger.debug("Creating SoundboardMix...")
+            subprocess.run([
+                "pactl", "load-module", "module-null-sink",
+                "sink_name=SoundboardMix",
+                "sink_properties=device.description=SoundboardMix"
+            ], check=True)
+        # Loopback soundboard to mix
+        if "module-loopback" not in modules or "SoundboardSink.monitor" not in modules or "SoundboardMix" not in modules:
+            logger.debug("Loopback SoundboardSink.monitor to SoundboardMix...")
+            subprocess.run([
+                "pactl", "load-module", "module-loopback",
+                "source=SoundboardSink.monitor",
+                "sink=SoundboardMix"
+            ], check=True)
+        # Loopback mic to mix
+        if "module-loopback" not in modules or mic_source not in modules or "SoundboardMix" not in modules:
+            logger.debug(f"Loopback {mic_source} to SoundboardMix...")
+            subprocess.run([
+                "pactl", "load-module", "module-loopback",
+                f"source={mic_source}",
+                f"sink=SoundboardMix"
+            ], check=True)
+        # Remap mix monitor as source
+        if "SoundboardMixSource" not in sources:
+            logger.debug("Remapping SoundboardMix.monitor as SoundboardMixSource...")
             subprocess.run([
                 "pactl", "load-module", "module-remap-source",
-                "master=SoundboardSink.monitor",
-                "source_name=SoundboardSource",
-                "source_properties=device.description=SoundboardSource"
+                "master=SoundboardMix.monitor",
+                "source_name=SoundboardMixSource",
+                "source_properties=device.description=SoundboardMixSource"
             ], check=True)
+        logger.debug("PipeWire virtual source setup complete.")
     except Exception as e:
-        print(f"Warning: Could not set up PipeWire virtual source: {e}")
+        logger.warning(f"Could not set up PipeWire virtual source: {e}")
 
 def cleanup_pipewire_virtual_source():
     try:
         modules = subprocess.check_output(["pactl", "list", "short", "modules"]).decode()
         for line in modules.splitlines():
-            if ("module-null-sink" in line and "SoundboardSink" in line) or ("module-remap-source" in line and "SoundboardSource" in line):
+            if ("module-null-sink" in line and ("SoundboardSink" in line or "SoundboardMix" in line)) or \
+               ("module-remap-source" in line and ("SoundboardSource" in line or "SoundboardMixSource" in line)) or \
+               ("module-loopback" in line):
                 module_id = line.split()[0]
                 subprocess.run(["pactl", "unload-module", module_id], check=True)
     except Exception as e:
-        print(f"Warning: Could not clean up PipeWire virtual source: {e}")
+        logger.warning(f"Could not clean up PipeWire virtual source: {e}")
 
 class SoundButton(QPushButton):
     def __init__(self, label, board, audio_path=None):
@@ -66,7 +127,13 @@ class SoundButton(QPushButton):
             data, fs = sf.read(self.audio_path, dtype='float32')
             device_idx = self.board.output_device
             try:
-                device_info = sd.query_devices(device_idx, 'output')
+                # Log device info before playback
+                try:
+                    device_info = sd.query_devices(device_idx, 'output')
+                    logger.debug(f"Attempting playback on device idx {device_idx}: {device_info['name']} (max output channels: {device_info['max_output_channels']})")
+                except Exception as info_err:
+                    logger.error(f"Error querying device info for idx {device_idx}: {info_err}")
+                    raise
                 device_rate = int(device_info['default_samplerate'])
                 if fs != device_rate:
                     duration = data.shape[0] / fs
@@ -84,10 +151,13 @@ class SoundButton(QPushButton):
                 with sd.OutputStream(samplerate=fs, device=device_idx, channels=data.shape[1] if data.ndim > 1 else 1) as stream:
                     stream.write(data)
             except PortAudioError as e:
+                logger.error(f"Playback error: {e}")
                 QMessageBox.critical(self, "Playback Error", f"Could not play sound.\nError: {e}\nTry converting your audio file to a standard sample rate like 48000 Hz or check your PipeWire device settings.")
             except Exception as e:
+                logger.error(f"Playback error: {e}")
                 QMessageBox.critical(self, "Playback Error", f"Could not play sound.\nError: {e}")
         else:
+            logger.info("No audio file assigned to this button.")
             QMessageBox.information(self, "No Sound", "No audio file assigned to this button.")
 
     def open_menu(self, pos):
@@ -109,52 +179,73 @@ class SoundButton(QPushButton):
 
 class SoundBoard(QMainWindow):
     def __init__(self):
+        logger.debug("Initializing SoundBoard app...")
         super().__init__()
+        ensure_pipewire_virtual_source()  # Ensure virtual sink/source is set up before device dropdown
+        logger.debug("Creating main window and layout...")
         self.setWindowTitle("pySoundBoard")
         self.central = QWidget()
         self.setCentralWidget(self.central)
         self.main_layout = QVBoxLayout()
         self.central.setLayout(self.main_layout)
-        self.device_dropdown = self.create_device_dropdown()
-        self.main_layout.addWidget(self.device_dropdown)
+        logger.debug("Creating output device dropdown...")
+        self.output_device_dropdown = self.create_device_dropdown(device_type='output')
+        self.main_layout.addWidget(self.output_device_dropdown)
+        logger.debug("Creating grid layout for buttons...")
         self.layout = QGridLayout()
         self.main_layout.addLayout(self.layout)
         self.buttons = []
         self.db = SoundboardDB()
-        print("[DEBUG] Available devices:")
+        logger.debug("Querying available devices:")
         for idx, dev in enumerate(sd.query_devices()):
-            print(f"  [{idx}] {dev['name']} (max output channels: {dev['max_output_channels']}, max input channels: {dev['max_input_channels']})")
-        # Restore last selected device if available
-        saved_device = self.db.get_setting('audio_device')
-        self.output_device = int(saved_device) if saved_device is not None else self.get_pipewire_device()
-        self.device_dropdown.setCurrentIndex(self.output_device if self.output_device is not None else 0)
-        print(f"[DEBUG] Selected output device index: {self.output_device}")
+            logger.debug(f"  [{idx}] {dev['name']} (max output channels: {dev['max_output_channels']}, max input channels: {dev['max_input_channels']})")
+        logger.debug("Binding output to SoundboardSink...")
+        self.output_device = self.get_pipewire_device()
+        self.output_device_dropdown.setCurrentIndex(self.output_device)
+        logger.debug(f"Selected output device index: {self.output_device}")
         if self.output_device is not None:
             dev = sd.query_devices(self.output_device)
-            print(f"[DEBUG] Output device name: {dev['name']}")
+            logger.debug(f"Output device name: {dev['name']}")
         self.rows = 3
         self.cols = 3
         self.current_config_id = None
+        logger.debug("Initializing menu...")
         self.init_menu()
+        logger.debug("Loading last used config...")
         self.load_last_used_config()
+        logger.debug("SoundBoard app initialization complete.")
 
-    def create_device_dropdown(self):
-        device_box = QComboBox()
-        self.device_names = []
-        self.device_indices = []
+    def create_device_dropdown(self, device_type='output'):
+        device_box = DeviceComboBox(populate_callback=self.populate_device_dropdown)
+        self.populate_device_dropdown(device_box)
+        device_box.currentIndexChanged.connect(self.on_output_device_selected)
+        return device_box
+
+    def populate_device_dropdown(self, device_box):
+        import sys
+        import re
+        import subprocess
+        device_box.clear()
+        names = []
+        indices = []
+        # Run 'python -m sounddevice' in a subprocess and parse output
+        device_box.clear()
+        names = []
+        indices = []
         for idx, dev in enumerate(sd.query_devices()):
             if dev['max_output_channels'] > 0:
                 label = f"{dev['name']} (idx {idx})"
                 device_box.addItem(label)
-                self.device_names.append(dev['name'])
-                self.device_indices.append(idx)
-        device_box.currentIndexChanged.connect(self.on_device_selected)
-        return device_box
+                names.append(dev['name'])
+                indices.append(idx)
+                logger.debug(f"Device {idx}: {dev['name']} (max output channels: {dev['max_output_channels']})")
+        self.output_device_names = names
+        self.output_device_indices = indices
 
-    def on_device_selected(self, idx):
-        if 0 <= idx < len(self.device_indices):
-            self.output_device = self.device_indices[idx]
-            print(f"[DEBUG] User selected output device: {self.device_names[idx]} (idx {self.output_device})")
+    def on_output_device_selected(self, idx):
+        if 0 <= idx < len(self.output_device_indices):
+            self.output_device = self.output_device_indices[idx]
+            logger.debug(f"User selected output device: {self.output_device_names[idx]} (idx {self.output_device})")
             self.db.set_setting('audio_device', self.output_device)
 
     def init_menu(self):
@@ -309,11 +400,8 @@ class SoundBoard(QMainWindow):
 
 if __name__ == "__main__":
     from PyQt6.QtCore import QCoreApplication, Qt
-    import atexit
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, True)
-    ensure_pipewire_virtual_source()
-    atexit.register(cleanup_pipewire_virtual_source)
     app = QApplication(sys.argv)
     win = SoundBoard()
     win.show()
-sys.exit(app.exec())
+    sys.exit(app.exec())

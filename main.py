@@ -1,6 +1,6 @@
 import sys
 import subprocess
-import json
+from soundboard_db import SoundboardDB
 import numpy as np
 import soundfile as sf
 from PyQt6.QtWidgets import (
@@ -120,10 +120,13 @@ class SoundBoard(QMainWindow):
         self.layout = QGridLayout()
         self.main_layout.addLayout(self.layout)
         self.buttons = []
+        self.db = SoundboardDB()
         print("[DEBUG] Available devices:")
         for idx, dev in enumerate(sd.query_devices()):
             print(f"  [{idx}] {dev['name']} (max output channels: {dev['max_output_channels']}, max input channels: {dev['max_input_channels']})")
-        self.output_device = self.get_pipewire_device()
+        # Restore last selected device if available
+        saved_device = self.db.get_setting('audio_device')
+        self.output_device = int(saved_device) if saved_device is not None else self.get_pipewire_device()
         self.device_dropdown.setCurrentIndex(self.output_device if self.output_device is not None else 0)
         print(f"[DEBUG] Selected output device index: {self.output_device}")
         if self.output_device is not None:
@@ -131,8 +134,9 @@ class SoundBoard(QMainWindow):
             print(f"[DEBUG] Output device name: {dev['name']}")
         self.rows = 3
         self.cols = 3
+        self.current_config_id = None
         self.init_menu()
-        self.init_ui()
+        self.load_last_used_config()
 
     def create_device_dropdown(self):
         device_box = QComboBox()
@@ -151,24 +155,83 @@ class SoundBoard(QMainWindow):
         if 0 <= idx < len(self.device_indices):
             self.output_device = self.device_indices[idx]
             print(f"[DEBUG] User selected output device: {self.device_names[idx]} (idx {self.output_device})")
+            self.db.set_setting('audio_device', self.output_device)
 
     def init_menu(self):
         menubar = self.menuBar()
         board_menu = menubar.addMenu("Menu")
         add_btn_action = QAction("Add Button", self)
         add_btn_action.triggered.connect(self.add_button_dialog)
-        save_action = QAction("Save Layout", self)
-        save_action.triggered.connect(self.save_layout)
-        load_action = QAction("Load Layout", self)
-        load_action.triggered.connect(self.load_layout)
+        save_action = QAction("Save Config", self)
+        save_action.triggered.connect(self.save_config_dialog)
+        load_action = QAction("Switch Config", self)
+        load_action.triggered.connect(self.switch_config_dialog)
+        export_action = QAction("Export Config to JSON", self)
+        export_action.triggered.connect(self.export_config_json)
+        import_action = QAction("Import Config from JSON", self)
+        import_action.triggered.connect(self.import_config_json)
         board_menu.addAction(add_btn_action)
         board_menu.addAction(save_action)
         board_menu.addAction(load_action)
+        board_menu.addAction(export_action)
+        board_menu.addAction(import_action)
+    def export_config_json(self):
+        if not self.current_config_id:
+            QMessageBox.information(self, "No Config", "No configuration loaded.")
+            return
+        btns = self.db.get_config_buttons(self.current_config_id)
+        layout_data = {
+            'rows': self.rows,
+            'cols': self.cols,
+            'buttons': [
+                {'row': row, 'col': col, 'label': label, 'audio_path': audio_path}
+                for (label, audio_path, row, col) in btns
+            ]
+        }
+        path, _ = QFileDialog.getSaveFileName(self, "Export Config", "soundboard.json", "JSON Files (*.json)")
+        if path:
+            import json
+            with open(path, 'w') as f:
+                json.dump(layout_data, f, indent=2)
 
-    def init_ui(self):
-        for i in range(self.rows):
-            for j in range(self.cols):
-                self.add_button(i, j)
+    def import_config_json(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import Config", "", "JSON Files (*.json)")
+        if not path:
+            return
+        import json
+        with open(path, 'r') as f:
+            layout_data = json.load(f)
+        btns = layout_data.get('buttons', [])
+        self.rows = layout_data.get('rows', 3)
+        self.cols = layout_data.get('cols', 3)
+        # Ask for config name
+        text, ok = QInputDialog.getText(self, "Import Config", "Enter name for imported configuration:")
+        if ok and text:
+            btn_dicts = [
+                {'label': b['label'], 'audio_path': b.get('audio_path'), 'row': b['row'], 'col': b['col']}
+                for b in btns
+            ]
+            config_id = self.db.save_config(text, btn_dicts, self.rows, self.cols)
+            self.db.set_last_used_config(config_id)
+            self.current_config_id = config_id
+            self.init_ui([(b['label'], b.get('audio_path'), b['row'], b['col']) for b in btns])
+
+    def init_ui(self, buttons=None):
+        # Remove existing buttons
+        for (btn, _, _) in self.buttons:
+            self.layout.removeWidget(btn)
+            btn.deleteLater()
+        self.buttons.clear()
+        # Add buttons from config or default
+        if buttons:
+            for btn_data in buttons:
+                btn = SoundButton(btn_data[0], self, btn_data[1])
+                self.layout.addWidget(btn, btn_data[2], btn_data[3])
+                self.buttons.append((btn, btn_data[2], btn_data[3]))
+        else:
+            for i in range(self.rows):
+                for j in range(self.cols):
+                    self.add_button(i, j)
 
     def add_button(self, row, col, label=None, audio_path=None):
         label = label or f"Button {row*self.cols+col+1}"
@@ -198,37 +261,38 @@ class SoundBoard(QMainWindow):
             btn.deleteLater()
             self.buttons = [(b, r, c) for (b, r, c) in self.buttons if b != btn]
 
-    def save_layout(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Layout", "soundboard.json", "JSON Files (*.json)")
-        if not path:
-            return
-        layout_data = {
-            'rows': self.rows,
-            'cols': self.cols,
-            'buttons': [
-                {'row': row, 'col': col, **btn.to_dict()}
+    def save_config_dialog(self):
+        text, ok = QInputDialog.getText(self, "Save Config", "Enter configuration name:")
+        if ok and text:
+            btns = [
+                {'label': btn.text(), 'audio_path': btn.audio_path, 'row': row, 'col': col}
                 for (btn, row, col) in self.buttons
             ]
-        }
-        with open(path, 'w') as f:
-            json.dump(layout_data, f, indent=2)
+            config_id = self.db.save_config(text, btns, self.rows, self.cols)
+            self.db.set_last_used_config(config_id)
+            self.current_config_id = config_id
 
-    def load_layout(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load Layout", "", "JSON Files (*.json)")
-        if not path:
+    def switch_config_dialog(self):
+        configs = self.db.get_all_configs()
+        if not configs:
+            QMessageBox.information(self, "No Configs", "No configurations found.")
             return
-        with open(path, 'r') as f:
-            layout_data = json.load(f)
-        for (btn, _, _) in self.buttons:
-            self.layout.removeWidget(btn)
-            btn.deleteLater()
-        self.buttons.clear()
-        self.rows = layout_data.get('rows', 3)
-        self.cols = layout_data.get('cols', 3)
-        for btn_data in layout_data['buttons']:
-            btn = SoundButton(btn_data['label'], self, btn_data.get('audio_path'))
-            self.layout.addWidget(btn, btn_data['row'], btn_data['col'])
-            self.buttons.append((btn, btn_data['row'], btn_data['col']))
+        items = [name for (_, name) in configs]
+        idx, ok = QInputDialog.getItem(self, "Switch Config", "Select configuration:", items, editable=False)
+        if ok:
+            config_id = configs[items.index(idx)][0]
+            self.db.set_last_used_config(config_id)
+            self.current_config_id = config_id
+            btns = self.db.get_config_buttons(config_id)
+            self.init_ui(btns)
+    def load_last_used_config(self):
+        config = self.db.get_last_used_config()
+        if config:
+            self.current_config_id = config[0]
+            btns = self.db.get_config_buttons(config[0])
+            self.init_ui(btns)
+        else:
+            self.init_ui()
 
     def get_pipewire_device(self):
         devices = sd.query_devices()
@@ -253,4 +317,3 @@ if __name__ == "__main__":
     win = SoundBoard()
     win.show()
 sys.exit(app.exec())
-# End of file. All duplicate and corrupted code below this line has been removed.

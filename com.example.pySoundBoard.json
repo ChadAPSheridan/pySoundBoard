@@ -1,0 +1,129 @@
+{
+  "app-id": "com.example.pySoundBoard",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "24.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "soundboard.sh",
+  "finish-args": [
+    "--share=network",
+    "--filesystem=host",
+    "--env=LD_LIBRARY_PATH=/app/lib:/usr/lib",
+    "--socket=x11",
+    "--socket=wayland",
+    "--device=dri",
+    "--socket=pulseaudio"
+  ],
+  "modules": [
+    {
+      "name": "portaudio",
+      "buildsystem": "autotools",
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://github.com/PortAudio/portaudio/archive/refs/tags/v19.7.0.tar.gz",
+          "sha256": "5af29ba58bbdbb7bbcefaaecc77ec8fc413f0db6f4c4e286c40c3e1b83174fa0"
+        }
+      ]
+    },
+    {
+      "name": "xcb-cursor",
+      "buildsystem": "autotools",
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://gitlab.freedesktop.org/xorg/lib/libxcb-cursor/-/archive/xcb-util-cursor-0.1.4/libxcb-cursor-xcb-util-cursor-0.1.4.tar.gz",
+          "sha256": "c50d5794d8de6324683281a66f42afd617fcc2b0a2c254843fcd93b52ff80741"
+        },
+        {
+          "type": "patch",
+          "path": "xcb-cursor-autotools.patch"
+        }
+      ],
+      "build-commands": [
+        "patch -p1 < xcb-cursor-autotools.patch",
+        "aclocal",
+        "autoconf",
+        "automake --add-missing",
+        "./configure --prefix=/app",
+        "make",
+        "make install"
+      ]
+    },
+    {
+      "name": "pySoundBoard",
+      "buildsystem": "simple",
+      "build-commands": [
+        "python3 setup.py install --prefix=/app"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "."
+        },
+        {
+          "type": "file",
+          "path": "PyQt6_qt6-6.9.1-py3-none-manylinux_2_28_x86_64.whl"
+        },
+        {
+          "type": "file",
+          "path": "PyQt6-6.9.1-cp39-abi3-manylinux_2_28_x86_64.whl"
+        },
+        {
+          "type": "file",
+          "path": "pyqt6_sip-13.10.2-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.whl"
+        },
+        {
+          "type": "file",
+          "path": "soundfile-0.13.1-py2.py3-none-manylinux_2_28_x86_64.whl"
+        },
+        {
+          "type": "file",
+          "path": "numpy-2.3.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+        },
+        {
+          "type": "file",
+          "path": "launch_soundboard.py"
+        },
+        {
+          "type": "file",
+          "path": "requirements.txt"
+        },
+        {
+          "type": "file",
+          "path": "main.py"
+        },
+        {
+          "type": "file",
+          "path": "soundboard_db.py"
+        },
+        {
+          "type": "file",
+          "path": "pycparser-2.22-py3-none-any.whl"
+        },
+        {
+          "type": "file",
+          "path": "cffi-1.17.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+        },
+        {
+          "type": "file",
+          "path": "sounddevice-0.5.2-py3-none-any.whl"
+        },
+        {
+          "type": "file",
+          "path": "soundboard.sh"
+        }
+      ],      
+      "build-options": {
+        "env": {
+          "QT_QPA_PLATFORM": "xcb"
+        }
+      },
+      "runtime-dependencies": [
+        "qt6-qtbase",
+        "qt6-qtwayland",
+        "libxcb",
+        "xcb-cursor"
+      ]
+    }
+  ]
+}

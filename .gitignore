@@ -3,9 +3,16 @@
 /.env
 /clips/*
 *.json
+!com.example.pySoundBoard.json
 *.pyc
 __pycache__/
 **/*.log
 *.log
 **/*.db
 *.db
+## Flatpak
+.flatpak-builder/
+**/*.whl
+**/*.tar.gz
+**/*.tgz
+**/*.patch

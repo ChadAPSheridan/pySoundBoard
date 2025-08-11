@@ -9,7 +9,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QMenuBar, QMenu, QMessageBox, QVBoxLayout, QComboBox
 )
 from PyQt6.QtGui import QAction
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QTimer
 import sounddevice as sd
 from sounddevice import PortAudioError
 
@@ -204,28 +205,23 @@ class SoundBoard(QMainWindow):
         ensure_pipewire_virtual_source()  # Ensure virtual sink/source is set up before device dropdown
         logger.debug("Creating main window and layout...")
         self.setWindowTitle("pySoundBoard")
+        self.setWindowIcon(QIcon("pySoundBoard.png"))
         self.central = QWidget()
         self.setCentralWidget(self.central)
         self.main_layout = QVBoxLayout()
         self.central.setLayout(self.main_layout)
+        self.db = SoundboardDB()
         logger.debug("Creating output device dropdown...")
         self.output_device_dropdown = self.create_device_dropdown(device_type='output')
+        self.output_device_dropdown.setToolTip("Only change this if you know what you are doing")
         self.main_layout.addWidget(self.output_device_dropdown)
         logger.debug("Creating grid layout for buttons...")
         self.layout = QGridLayout()
         self.main_layout.addLayout(self.layout)
         self.buttons = []
-        self.db = SoundboardDB()
         logger.debug("Querying available devices:")
         for idx, dev in enumerate(sd.query_devices()):
             logger.debug(f"  [{idx}] {dev['name']} (max output channels: {dev['max_output_channels']}, max input channels: {dev['max_input_channels']})")
-        logger.debug("Binding output to SoundboardSink...")
-        self.output_device = self.get_pipewire_device()
-        self.output_device_dropdown.setCurrentIndex(self.output_device)
-        logger.debug(f"Selected output device index: {self.output_device}")
-        if self.output_device is not None:
-            dev = sd.query_devices(self.output_device)
-            logger.debug(f"Output device name: {dev['name']}")
         self.rows = 3
         self.cols = 3
         self.current_config_id = None
@@ -239,17 +235,22 @@ class SoundBoard(QMainWindow):
     def create_device_dropdown(self, device_type='output'):
         device_box = DeviceComboBox(populate_callback=self.populate_device_dropdown)
         self.populate_device_dropdown(device_box)
+        # Default to SoundboardSink if available
+        sink_index = None
+        for i in range(device_box.count()):
+            if 'SoundboardSink' in device_box.itemText(i):
+                sink_index = i
+                break
+        if sink_index is not None:
+            device_box.setCurrentIndex(sink_index)
+            self.output_device = self.output_device_indices[sink_index]
+            logger.debug(f"Defaulting output device to SoundboardSink (idx {self.output_device})")
         device_box.currentIndexChanged.connect(self.on_output_device_selected)
         return device_box
 
     def populate_device_dropdown(self, device_box):
         import sys
         import re
-        import subprocess
-        device_box.clear()
-        names = []
-        indices = []
-        # Run 'python -m sounddevice' in a subprocess and parse output
         device_box.clear()
         names = []
         indices = []
@@ -272,8 +273,16 @@ class SoundBoard(QMainWindow):
     def init_menu(self):
         menubar = self.menuBar()
         board_menu = menubar.addMenu("Menu")
+        # New submenu
+        new_menu = QMenu("New...", self)
         add_btn_action = QAction("Add Button", self)
-        add_btn_action.triggered.connect(self.add_button_dialog)
+        add_btn_action.triggered.connect(lambda: QTimer.singleShot(0, self.add_button_dialog))
+        new_config_action = QAction("New Config", self)
+        new_config_action.triggered.connect(lambda: QTimer.singleShot(0, self.new_config_dialog))
+        new_menu.addAction(add_btn_action)
+        new_menu.addAction(new_config_action)
+        board_menu.addMenu(new_menu)
+        # Other actions
         save_action = QAction("Save Config", self)
         save_action.triggered.connect(self.save_config_dialog)
         load_action = QAction("Switch Config", self)
@@ -282,14 +291,10 @@ class SoundBoard(QMainWindow):
         export_action.triggered.connect(self.export_config_json)
         import_action = QAction("Import Config from JSON", self)
         import_action.triggered.connect(self.import_config_json)
-        new_config_action = QAction("New Config", self)
-        new_config_action.triggered.connect(self.new_config_dialog)
-        board_menu.addAction(add_btn_action)
         board_menu.addAction(save_action)
         board_menu.addAction(load_action)
         board_menu.addAction(export_action)
         board_menu.addAction(import_action)
-        board_menu.addAction(new_config_action)
 
 
     def new_config_dialog(self):
@@ -360,6 +365,10 @@ class SoundBoard(QMainWindow):
             for i in range(self.rows):
                 for j in range(self.cols):
                     self.add_button(i, j)
+        self.layout.invalidate()  # Invalidate layout to force recalculation
+        self.layout.activate()    # Recalculate layout
+        self.updateGeometry()     # Update widget geometry
+        self.adjustSize()         # Adjust window size to fit new layout
 
     def add_button(self, row, col, label=None, audio_path=None):
         label = label or f"Button {row*self.cols+col+1}"
@@ -450,6 +459,22 @@ class SoundBoard(QMainWindow):
     def closeEvent(self, event):
         self.check_unsaved_changes()
         event.accept()
+
+    def load_config(self, config_id):
+        config = self.db.get_config(config_id)
+        if not config:
+            logger.warning(f"Config not found: {config_id}")
+            return
+        self.current_config_id = config_id
+        self.current_config_name = config['name']
+        buttons = self.db.get_config_buttons(config_id)
+        self.init_ui([(btn[0], btn[1], btn[2], btn[3]) for btn in buttons])  # Populate buttons using init_ui
+        self.layout.activate()  # Recalculate layout
+        self.updateGeometry()   # Update widget geometry
+        self.central.updateGeometry()  # Update central widget geometry
+        self.central.adjustSize()      # Adjust central widget size
+        self.adjustSize()              # Adjust window size to fit new layout
+        logger.debug(f"Loaded config: {config['name']} (id: {config_id})")
 
 if __name__ == "__main__":
     from PyQt6.QtCore import QCoreApplication, Qt
